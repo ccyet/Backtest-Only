@@ -5,7 +5,14 @@ from typing import Any
 import pandas as pd
 
 from analyzer import run_parameter_scan
-from models import AnalysisParams, ParamScanAxis, ParamScanConfig, validate_params
+from models import (
+    ENTRY_FACTORS,
+    FACTOR_SCAN_ELIGIBLE_FIELDS,
+    AnalysisParams,
+    ParamScanAxis,
+    ParamScanConfig,
+    validate_params,
+)
 
 
 def make_params(scan_config: ParamScanConfig, **overrides: Any) -> AnalysisParams:
@@ -152,3 +159,49 @@ def test_required_lookback_days_considers_factor_lookback() -> None:
         trend_breakout_lookback=30,
     )
     assert params.required_lookback_days == 35
+
+
+def test_parameter_scan_validation_accepts_candle_run_axis() -> None:
+    params = make_params(
+        ParamScanConfig(
+            enabled=True,
+            axes=(
+                ParamScanAxis(field_name="candle_run_length", values=(2, 3)),
+            ),
+            metric="total_return_pct",
+            max_combinations=25,
+        ),
+        entry_factor="candle_run",
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_parameter_scan_validation_accepts_candle_run_acceleration_axis() -> None:
+    params = make_params(
+        ParamScanConfig(
+            enabled=True,
+            axes=(
+                ParamScanAxis(field_name="candle_run_min_body_pct", values=(0.5, 1.0)),
+            ),
+            metric="total_return_pct",
+            max_combinations=25,
+        ),
+        entry_factor="candle_run_acceleration",
+    )
+    errors, _ = validate_params(params)
+    assert not errors
+
+
+def test_selected_strategy_variants_are_present_in_model_contract() -> None:
+    assert "candle_run" in ENTRY_FACTORS
+    assert "candle_run_acceleration" in ENTRY_FACTORS
+    assert FACTOR_SCAN_ELIGIBLE_FIELDS["candle_run"] == FACTOR_SCAN_ELIGIBLE_FIELDS[
+        "candle_run_acceleration"
+    ]
+
+
+def test_validation_rejects_reserved_intraday_timeframe_until_data_is_connected() -> None:
+    params = make_params(ParamScanConfig(enabled=False), timeframe="30m")
+    errors, _ = validate_params(params)
+    assert any("timeframe 插座" in error for error in errors)

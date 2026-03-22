@@ -319,3 +319,87 @@ def test_trend_breakout_missing_volume_remains_fillable() -> None:
     assert trade["entry_factor"] == "trend_breakout"
     assert float(trade["entry_trigger_price"]) == 100.0
     assert trade["entry_fill_type"] == "open"
+
+
+def test_candle_run_long_signal_uses_prior_bars_and_open_entry() -> None:
+    df = make_df(
+        [
+            (100.0, 101.5, 99.8, 101.2, 1000),
+            (101.2, 103.0, 101.0, 102.8, 1000),
+            (103.0, 104.0, 102.7, 103.5, 1000),
+            (103.5, 104.0, 102.8, 103.0, 1000),
+        ]
+    )
+    params = make_params(
+        entry_factor="candle_run",
+        candle_run_length=2,
+        candle_run_min_body_pct=1.0,
+        candle_run_total_move_pct=2.0,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 2, params)
+
+    assert not bool(enriched.loc[1, "is_signal"])
+    assert bool(enriched.loc[2, "is_signal"])
+    assert reason is None
+    assert trade is not None
+    assert trade["entry_factor"] == "candle_run"
+    assert trade["entry_fill_type"] == "open"
+    assert pd.isna(trade["entry_trigger_price"])
+    assert float(trade["buy_price"]) == 103.0
+
+
+def test_candle_run_short_signal_uses_prior_bars_and_open_entry() -> None:
+    df = make_df(
+        [
+            (100.0, 100.2, 98.5, 98.8, 1000),
+            (98.8, 99.0, 96.8, 97.0, 1000),
+            (96.8, 97.0, 95.8, 96.2, 1000),
+            (96.2, 96.5, 95.7, 96.0, 1000),
+        ]
+    )
+    params = make_params(
+        gap_direction="down",
+        entry_factor="candle_run",
+        candle_run_length=2,
+        candle_run_min_body_pct=1.0,
+        candle_run_total_move_pct=2.0,
+    )
+    enriched = apply_gap_filters(df, params)
+    trade, reason = simulate_trade(enriched, 2, params, direction="short")
+
+    assert bool(enriched.loc[2, "is_signal"])
+    assert reason is None
+    assert trade is not None
+    assert trade["entry_factor"] == "candle_run"
+    assert trade["entry_fill_type"] == "open"
+    assert float(trade["buy_price"]) == 96.8
+
+
+def test_candle_run_acceleration_requires_non_decreasing_body_strength() -> None:
+    accelerating_df = make_df(
+        [
+            (100.0, 101.2, 99.8, 101.0, 1000),
+            (101.0, 103.4, 100.9, 103.2, 1000),
+            (103.2, 104.0, 103.0, 103.6, 1000),
+        ]
+    )
+    decelerating_df = make_df(
+        [
+            (100.0, 102.3, 99.8, 102.0, 1000),
+            (102.0, 103.2, 101.8, 103.0, 1000),
+            (103.0, 103.6, 102.8, 103.3, 1000),
+        ]
+    )
+    params = make_params(
+        entry_factor="candle_run_acceleration",
+        candle_run_length=2,
+        candle_run_min_body_pct=0.5,
+        candle_run_total_move_pct=2.0,
+    )
+
+    accelerating = apply_gap_filters(accelerating_df, params)
+    decelerating = apply_gap_filters(decelerating_df, params)
+
+    assert bool(accelerating.loc[2, "is_signal"])
+    assert not bool(decelerating.loc[2, "is_signal"])

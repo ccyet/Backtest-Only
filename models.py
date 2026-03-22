@@ -4,7 +4,13 @@ from dataclasses import dataclass, field, replace
 
 
 GAP_ENTRY_MODES = ("strict_break", "open_vs_prev_close_threshold")
-ENTRY_FACTORS = ("gap", "trend_breakout", "volatility_contraction_breakout")
+ENTRY_FACTORS = (
+    "gap",
+    "trend_breakout",
+    "volatility_contraction_breakout",
+    "candle_run",
+    "candle_run_acceleration",
+)
 SCAN_METRICS = (
     "signal_count",
     "closed_trade_candidates",
@@ -23,6 +29,9 @@ SCAN_FIELD_CASTERS: dict[str, type[int] | type[float]] = {
     "trend_breakout_lookback": int,
     "vcb_range_lookback": int,
     "vcb_breakout_lookback": int,
+    "candle_run_length": int,
+    "candle_run_min_body_pct": float,
+    "candle_run_total_move_pct": float,
     "time_stop_days": int,
     "time_stop_target_pct": float,
     "stop_loss_pct": float,
@@ -64,6 +73,36 @@ FACTOR_SCAN_ELIGIBLE_FIELDS: dict[str, frozenset[str]] = {
         {
             "vcb_range_lookback",
             "vcb_breakout_lookback",
+            "time_stop_days",
+            "time_stop_target_pct",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "profit_drawdown_pct",
+            "exit_ma_period",
+            "buy_slippage_pct",
+            "sell_slippage_pct",
+        }
+    ),
+    "candle_run": frozenset(
+        {
+            "candle_run_length",
+            "candle_run_min_body_pct",
+            "candle_run_total_move_pct",
+            "time_stop_days",
+            "time_stop_target_pct",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "profit_drawdown_pct",
+            "exit_ma_period",
+            "buy_slippage_pct",
+            "sell_slippage_pct",
+        }
+    ),
+    "candle_run_acceleration": frozenset(
+        {
+            "candle_run_length",
+            "candle_run_min_body_pct",
+            "candle_run_total_move_pct",
             "time_stop_days",
             "time_stop_target_pct",
             "stop_loss_pct",
@@ -186,6 +225,10 @@ class AnalysisParams:
     vcb_breakout_lookback: int = 20
     buy_slippage_pct: float = 0.0
     sell_slippage_pct: float = 0.0
+    candle_run_length: int = 2
+    candle_run_min_body_pct: float = 1.0
+    candle_run_total_move_pct: float = 2.0
+    timeframe: str = "1d"
     local_data_root: str = "data/market/daily"
     adjust: str = "qfq"
     scan_config: ParamScanConfig = field(default_factory=ParamScanConfig)
@@ -248,6 +291,8 @@ class AnalysisParams:
                 lookback,
                 max(self.vcb_range_lookback, self.vcb_breakout_lookback) + 5,
             )
+        if self.entry_factor in {"candle_run", "candle_run_acceleration"}:
+            lookback = max(lookback, self.candle_run_length + 5)
         return lookback
 
     @property
@@ -325,6 +370,11 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
     if params.adjust not in {"qfq", "hfq"}:
         errors.append("复权方式只能为 qfq 或 hfq。")
 
+    if params.timeframe not in {"1d", "30m", "15m"}:
+        errors.append("timeframe 只能为 1d、30m 或 15m。")
+    elif params.timeframe != "1d":
+        errors.append("当前版本仅预留 timeframe 插座，15m/30m 数据接入将在后续扩展。")
+
     if params.gap_pct < 0:
         errors.append("跳空幅度不能为负数。")
 
@@ -342,6 +392,15 @@ def validate_params(params: AnalysisParams) -> tuple[list[str], list[str]]:
 
     if params.vcb_breakout_lookback < 1:
         errors.append("vcb_breakout_lookback 必须大于等于 1。")
+
+    if params.candle_run_length < 2:
+        errors.append("candle_run_length 必须大于等于 2。")
+
+    if params.candle_run_min_body_pct < 0:
+        errors.append("candle_run_min_body_pct 不能为负数。")
+
+    if params.candle_run_total_move_pct < 0:
+        errors.append("candle_run_total_move_pct 不能为负数。")
 
     if params.stop_loss_pct < 0:
         errors.append("止损比例不能为负数。")

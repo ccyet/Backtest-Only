@@ -254,3 +254,137 @@ def test_empty_scan_stats_include_new_skip_counters() -> None:
     assert detail_df.empty
     assert stats["skipped_entry_not_filled"] == 0
     assert stats["skipped_locked_bar_unfillable"] == 0
+
+
+def test_analyze_all_stocks_supports_candle_run_strategy_level_stats() -> None:
+    market_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-01-01", "2024-01-02", "2024-01-03", "2024-01-04"]
+            ),
+            "stock_code": ["000001.SZ"] * 4,
+            "open": [100.0, 101.2, 104.0, 105.0],
+            "high": [101.5, 103.8, 105.5, 107.0],
+            "low": [99.8, 101.0, 103.8, 104.8],
+            "close": [101.2, 103.5, 105.0, 106.5],
+            "volume": [1000.0, 1200.0, 1100.0, 1300.0],
+        }
+    )
+    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+        market_data,
+        make_params(
+            entry_factor="candle_run",
+            candle_run_length=2,
+            candle_run_min_body_pct=1.0,
+            candle_run_total_move_pct=2.0,
+        ),
+    )
+
+    assert len(detail_df) == 1
+    assert not daily_df.empty
+    assert not equity_df.empty
+    assert detail_df.iloc[0]["entry_factor"] == "candle_run"
+    assert int(stats["executed_trades"]) == 1
+    assert float(stats["strategy_win_rate_pct"]) == 100.0
+    assert float(stats["total_return_pct"]) > 0.0
+
+
+def test_analyze_all_stocks_supports_short_candle_run_strategy_level_stats() -> None:
+    market_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-02-01", "2024-02-02", "2024-02-03", "2024-02-04"]
+            ),
+            "stock_code": ["000002.SZ"] * 4,
+            "open": [100.0, 98.8, 96.8, 96.2],
+            "high": [100.2, 99.0, 97.0, 96.5],
+            "low": [98.5, 96.8, 95.8, 94.0],
+            "close": [98.8, 97.0, 96.2, 94.5],
+            "volume": [1000.0, 1100.0, 1200.0, 1250.0],
+        }
+    )
+    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+        market_data,
+        make_params(
+            gap_direction="down",
+            entry_factor="candle_run",
+            candle_run_length=2,
+            candle_run_min_body_pct=1.0,
+            candle_run_total_move_pct=2.0,
+        ),
+    )
+
+    assert len(detail_df) == 1
+    assert not daily_df.empty
+    assert not equity_df.empty
+    assert detail_df.iloc[0]["entry_factor"] == "candle_run"
+    assert int(stats["executed_trades"]) == 1
+    assert float(stats["strategy_win_rate_pct"]) == 100.0
+    assert float(stats["total_return_pct"]) > 0.0
+
+
+def test_analyze_all_stocks_supports_candle_run_acceleration_strategy_level_stats() -> None:
+    market_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-03-01", "2024-03-02", "2024-03-03", "2024-03-04"]
+            ),
+            "stock_code": ["000003.SZ"] * 4,
+            "open": [100.0, 101.0, 103.2, 104.5],
+            "high": [101.2, 103.4, 104.8, 106.0],
+            "low": [99.8, 100.9, 103.0, 104.3],
+            "close": [101.0, 103.2, 104.5, 105.8],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        }
+    )
+    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+        market_data,
+        make_params(
+            entry_factor="candle_run_acceleration",
+            candle_run_length=2,
+            candle_run_min_body_pct=0.5,
+            candle_run_total_move_pct=2.0,
+        ),
+    )
+
+    assert len(detail_df) == 1
+    assert not daily_df.empty
+    assert not equity_df.empty
+    assert detail_df.iloc[0]["entry_factor"] == "candle_run_acceleration"
+    assert int(stats["executed_trades"]) == 1
+    assert float(stats["strategy_win_rate_pct"]) == 100.0
+    assert float(stats["total_return_pct"]) > 0.0
+
+
+def test_analyze_all_stocks_supports_short_candle_run_acceleration_strategy_level_stats() -> None:
+    market_data = pd.DataFrame(
+        {
+            "date": pd.to_datetime(
+                ["2024-04-01", "2024-04-02", "2024-04-03", "2024-04-04"]
+            ),
+            "stock_code": ["000004.SZ"] * 4,
+            "open": [100.0, 98.8, 96.0, 94.8],
+            "high": [100.2, 99.0, 96.2, 95.0],
+            "low": [98.5, 95.8, 94.5, 92.8],
+            "close": [98.8, 96.0, 94.8, 93.2],
+            "volume": [1000.0, 1100.0, 1200.0, 1300.0],
+        }
+    )
+    detail_df, daily_df, equity_df, stats = analyzer.analyze_all_stocks(
+        market_data,
+        make_params(
+            gap_direction="down",
+            entry_factor="candle_run_acceleration",
+            candle_run_length=2,
+            candle_run_min_body_pct=0.5,
+            candle_run_total_move_pct=2.0,
+        ),
+    )
+
+    assert len(detail_df) == 1
+    assert not daily_df.empty
+    assert not equity_df.empty
+    assert detail_df.iloc[0]["entry_factor"] == "candle_run_acceleration"
+    assert int(stats["executed_trades"]) == 1
+    assert float(stats["strategy_win_rate_pct"]) == 100.0
+    assert float(stats["total_return_pct"]) > 0.0

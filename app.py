@@ -84,6 +84,9 @@ SCAN_FIELD_LABELS = {
     "trend_breakout_lookback": "趋势突破回看天数",
     "vcb_range_lookback": "波动收缩区间回看天数",
     "vcb_breakout_lookback": "波动收缩突破回看天数",
+    "candle_run_length": "连续K线根数",
+    "candle_run_min_body_pct": "单根最小实体幅度",
+    "candle_run_total_move_pct": "组合最小累计涨跌幅",
     "time_stop_days": "最多持有天数",
     "time_stop_target_pct": "时间退出收益阈值",
     "stop_loss_pct": "全仓止损",
@@ -157,6 +160,8 @@ ENTRY_FACTOR_LABELS = {
     "gap": "跳空",
     "trend_breakout": "趋势突破",
     "volatility_contraction_breakout": "波动收缩突破",
+    "candle_run": "连续K线追势",
+    "candle_run_acceleration": "连续K线加速追势",
 }
 FACTOR_SPECIFIC_WIDGET_KEYS = {
     "gap": ("gap_entry_mode", "gap_pct", "max_gap_filter_pct"),
@@ -164,6 +169,16 @@ FACTOR_SPECIFIC_WIDGET_KEYS = {
     "volatility_contraction_breakout": (
         "vcb_range_lookback",
         "vcb_breakout_lookback",
+    ),
+    "candle_run": (
+        "candle_run_length",
+        "candle_run_min_body_pct",
+        "candle_run_total_move_pct",
+    ),
+    "candle_run_acceleration": (
+        "candle_run_length",
+        "candle_run_min_body_pct",
+        "candle_run_total_move_pct",
     ),
 }
 FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
@@ -173,6 +188,9 @@ FACTOR_CONTROL_DEFAULTS: dict[str, str | int | float] = {
     "trend_breakout_lookback": 20,
     "vcb_range_lookback": 7,
     "vcb_breakout_lookback": 20,
+    "candle_run_length": 2,
+    "candle_run_min_body_pct": 1.0,
+    "candle_run_total_move_pct": 2.0,
 }
 SCAN_AXIS_STATE_KEYS = (
     ("scan_axis_1_field", "scan_axis_1_values"),
@@ -206,7 +224,10 @@ ENTRY_DIRECTION_OPTIONS = {
     "gap": (("向上跳空", "up"), ("向下跳空", "down")),
     "trend_breakout": (("向上突破", "up"), ("向下突破", "down")),
     "volatility_contraction_breakout": (("向上突破", "up"), ("向下突破", "down")),
+    "candle_run": (("连续阳线追涨", "up"), ("连续阴线追空", "down")),
+    "candle_run_acceleration": (("连续阳线加速追涨", "up"), ("连续阴线加速追空", "down")),
 }
+TIMEFRAME_OPTIONS = ("1d", "30m", "15m")
 
 
 def dataframe_stretch(
@@ -218,13 +239,21 @@ def dataframe_stretch(
 ) -> None:
     kwargs: dict[str, Any] = {
         "hide_index": hide_index,
-        "use_container_width": True,
+        "width": "stretch",
     }
     if column_config is not None:
         kwargs["column_config"] = column_config
     if height is not None:
         kwargs["height"] = height
-    st.dataframe(data, **kwargs)
+    try:
+        st.dataframe(data, **kwargs)
+    except TypeError as exc:
+        if "interpreted as an integer" not in str(exc):
+            raise
+        legacy_kwargs = dict(kwargs)
+        legacy_kwargs.pop("width", None)
+        legacy_kwargs["use_container_width"] = True
+        st.dataframe(data, **legacy_kwargs)
 
 
 def inject_custom_styles() -> None:
@@ -380,14 +409,16 @@ def render_trading_guide_page() -> None:
         """
         <div class='guide-card'>
             <h3>1. 回测范围与数据源</h3>
-            <p>先在侧边栏确定股票池、回测开始/结束日期和数据源。留空股票池表示全市场；优先推荐使用本地 Parquet 离线数据源，回放更稳定。</p>
+            <p>先在侧边栏确定股票池、回测开始/结束日期和数据源。留空股票池表示全市场；优先推荐使用本地 Parquet 离线数据源，回放更稳定。周期当前默认执行 1d，30m / 15m 已预留插座，后续可接入相应数据目录。</p>
         </div>
         <div class='guide-card'>
-            <h3>2. 三类入场因子</h3>
+            <h3>2. 五类入场因子</h3>
             <ul>
                 <li><b>跳空</b>：研究开盘相对前一日价格的跳空幅度，方向使用“向上跳空 / 向下跳空”。</li>
                 <li><b>趋势突破</b>：研究价格突破过去窗口高点或低点，方向使用“向上突破 / 向下突破”。</li>
                 <li><b>波动收缩突破</b>：先识别波动收缩，再判断后续向上或向下突破。</li>
+                <li><b>连续K线追势</b>：基于前序连续阳线 / 连续阴线组合，在下一根K线开盘追涨或追空。</li>
+                <li><b>连续K线加速追势</b>：在连续K线追势基础上，额外要求实体强度逐步增强。</li>
             </ul>
         </div>
         <div class='guide-card'>
@@ -417,10 +448,13 @@ def factor_control_default(field_name: str) -> Any:
 
 
 def reset_inactive_factor_controls(active_factor: str) -> None:
+    active_widget_keys = set(FACTOR_SPECIFIC_WIDGET_KEYS.get(active_factor, ()))
     for factor_name, widget_keys in FACTOR_SPECIFIC_WIDGET_KEYS.items():
         if factor_name == active_factor:
             continue
         for widget_key in widget_keys:
+            if widget_key in active_widget_keys:
+                continue
             st.session_state[widget_key] = factor_control_default(widget_key)
 
 
@@ -697,6 +731,9 @@ def format_scan_for_display(scan_df: pd.DataFrame) -> pd.DataFrame:
             "trend_breakout_lookback",
             "vcb_range_lookback",
             "vcb_breakout_lookback",
+            "candle_run_length",
+            "candle_run_min_body_pct",
+            "candle_run_total_move_pct",
             "time_stop_days",
             "time_stop_target_pct",
             "stop_loss_pct",
@@ -854,6 +891,13 @@ def build_scan_column_config() -> dict[str, object]:
         ),
         "波动收缩突破回看天数": st.column_config.TextColumn(
             "波动收缩突破回看天数", width="small"
+        ),
+        "连续K线根数": st.column_config.TextColumn("连续K线根数", width="small"),
+        "单根最小实体幅度": st.column_config.TextColumn(
+            "单根最小实体幅度", width="small"
+        ),
+        "组合最小累计涨跌幅": st.column_config.TextColumn(
+            "组合最小累计涨跌幅", width="small"
         ),
         "最多持有天数": st.column_config.TextColumn("最多持有天数", width="small"),
         "策略胜率": st.column_config.TextColumn("策略胜率", width="small"),
@@ -1029,11 +1073,11 @@ st.sidebar.header("运行设置")
 st.sidebar.caption("左侧聚焦回测范围与数据源选择，详细规则放在主区域。")
 st.sidebar.markdown("**回测范围**")
 stock_scope_text = st.sidebar.text_area(
-    "股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。"
+    "股票池", value="", help="多个代码可用逗号/空格/换行。留空表示全市场。", key="stock_scope_text"
 )
 sidebar_date_cols = st.sidebar.columns(2)
-start_date = sidebar_date_cols[0].date_input("回测开始", value=default_backtest_start)
-end_date = sidebar_date_cols[1].date_input("回测结束", value=today)
+start_date = sidebar_date_cols[0].date_input("回测开始", value=default_backtest_start, key="backtest_start_date")
+end_date = sidebar_date_cols[1].date_input("回测结束", value=today, key="backtest_end_date")
 SOURCE_LABEL_TO_TYPE = {
     "本地 Parquet（AKShare 离线）": "local_parquet",
     "Excel/CSV 文件": "file",
@@ -1044,6 +1088,13 @@ data_source_label = st.sidebar.selectbox(
     "数据源", options=list(SOURCE_LABEL_TO_TYPE.keys())
 )
 adjust_label = st.sidebar.selectbox("复权方式", options=["qfq", "hfq"], index=0)
+timeframe = st.sidebar.selectbox(
+    "周期（预留 30m/15m 插座）",
+    options=list(TIMEFRAME_OPTIONS),
+    index=0,
+    key="timeframe",
+)
+st.sidebar.caption("当前回测执行按 1d 生效；30m / 15m 为后续接入预留。")
 
 # 数据源输入（仍放侧边栏，保持小白可见）
 default_db_path = str(Path.cwd() / "market_data.sqlite")
@@ -1057,7 +1108,7 @@ with st.sidebar.expander(
     "数据源附加设置",
     expanded=data_source_label != "本地 Parquet（AKShare 离线）",
 ):
-    local_data_root = st.text_input("本地 Parquet 根目录", value="data/market/daily")
+    local_data_root = st.text_input("本地 Parquet 根目录", value="data/market/daily", key="local_data_root")
     if data_source_label == "SQLite 数据库":
         db_path = st.text_input("SQLite 路径", value=default_db_path)
         table_name = st.text_input("表名（可选）", value="")
@@ -1070,7 +1121,7 @@ with st.sidebar.expander(
     else:
         st.caption("当前使用本地 parquet 数据源，回测将直接读取本地目录。")
 
-submitted = st.sidebar.button("开始回测", type="primary")
+submitted = st.sidebar.button("开始回测", type="primary", key="run_backtest")
 st.sidebar.caption("结果会在当前页面下方的标签页中展示。")
 
 # ===== 主界面：配置摘要 =====
@@ -1169,7 +1220,7 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                 step=1,
                 key="trend_breakout_lookback",
             )
-        else:
+        elif entry_factor == "volatility_contraction_breakout":
             st.caption("波动收缩突破仅显示收缩/突破窗口，保持核心区紧凑。")
             direction_label = render_direction_selectbox(str(entry_factor))
             vcb_cols = st.columns(2)
@@ -1186,6 +1237,36 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
                 value=int(factor_control_default("vcb_breakout_lookback")),
                 step=1,
                 key="vcb_breakout_lookback",
+            )
+        else:
+            is_acceleration_mode = entry_factor == "candle_run_acceleration"
+            st.caption(
+                "连续K线追势基于前序连续阳线/阴线组合；加速模式额外要求实体强度逐步增强。"
+                if is_acceleration_mode
+                else "连续K线追势基于前序连续阳线/阴线组合，在下一根K线开盘追势。"
+            )
+            direction_label = render_direction_selectbox(str(entry_factor))
+            candle_cols = st.columns(3)
+            candle_cols[0].number_input(
+                "连续K线根数",
+                min_value=2,
+                value=int(factor_control_default("candle_run_length")),
+                step=1,
+                key="candle_run_length",
+            )
+            candle_cols[1].number_input(
+                "单根最小实体幅度（%）",
+                min_value=0.0,
+                value=float(factor_control_default("candle_run_min_body_pct")),
+                step=0.1,
+                key="candle_run_min_body_pct",
+            )
+            candle_cols[2].number_input(
+                "组合最小累计涨跌幅（%）",
+                min_value=0.0,
+                value=float(factor_control_default("candle_run_total_move_pct")),
+                step=0.1,
+                key="candle_run_total_move_pct",
             )
 
         gap_entry_mode = str(
@@ -1218,6 +1299,24 @@ with st.expander("⚙️ 核心交易规则配置", expanded=True):
             st.session_state.get(
                 "vcb_breakout_lookback",
                 factor_control_default("vcb_breakout_lookback"),
+            )
+        )
+        candle_run_length = int(
+            st.session_state.get(
+                "candle_run_length",
+                factor_control_default("candle_run_length"),
+            )
+        )
+        candle_run_min_body_pct = float(
+            st.session_state.get(
+                "candle_run_min_body_pct",
+                factor_control_default("candle_run_min_body_pct"),
+            )
+        )
+        candle_run_total_move_pct = float(
+            st.session_state.get(
+                "candle_run_total_move_pct",
+                factor_control_default("candle_run_total_move_pct"),
             )
         )
         use_ma_filter = st.checkbox("启用快慢线开单过滤", value=False)
@@ -1528,6 +1627,9 @@ if submitted:
         trend_breakout_lookback=int(trend_breakout_lookback),
         vcb_range_lookback=int(vcb_range_lookback),
         vcb_breakout_lookback=int(vcb_breakout_lookback),
+        candle_run_length=int(candle_run_length),
+        candle_run_min_body_pct=float(candle_run_min_body_pct),
+        candle_run_total_move_pct=float(candle_run_total_move_pct),
         use_ma_filter=bool(use_ma_filter),
         fast_ma_period=int(fast_ma_period),
         slow_ma_period=int(slow_ma_period),
@@ -1551,6 +1653,7 @@ if submitted:
         time_exit_mode="strict"
         if time_exit_mode_label == "按原规则剔除未达条件信号"
         else "force_close",
+        timeframe=str(timeframe),
         local_data_root=str(local_data_root),
         adjust=str(adjust_label),
         scan_config=scan_config,
@@ -1596,6 +1699,7 @@ if submitted:
                     sheet_name=params.excel_sheet_name,
                     local_data_root=params.local_data_root,
                     adjust=params.adjust,
+                    timeframe=params.timeframe,
                 )
                 scan_df = pd.DataFrame()
                 best_scan_overrides: dict[str, int | float] = {}

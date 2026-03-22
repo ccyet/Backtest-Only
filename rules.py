@@ -24,6 +24,7 @@ SIGNAL_COLUMNS = [
 BREAKOUT_ENTRY_FACTORS = frozenset(
     {"trend_breakout", "volatility_contraction_breakout"}
 )
+SEQUENCE_ENTRY_FACTORS = frozenset({"candle_run", "candle_run_acceleration"})
 
 
 def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
@@ -32,6 +33,10 @@ def _column(stock_df: pd.DataFrame, column_name: str) -> pd.Series:
 
 def _is_missing_scalar(value: object) -> bool:
     return bool(pd.isna(cast(Any, value)))
+
+
+def _float_scalar(value: object) -> float:
+    return float(cast(Any, value))
 
 
 def _compute_breakout_trigger_price(
@@ -53,6 +58,67 @@ def _compute_breakout_trigger_price(
     )
 
 
+def _compute_candle_run_body_pct(
+    stock_df: pd.DataFrame, direction: str
+) -> tuple[pd.Series, pd.Series]:
+    open_series = _column(stock_df, "open")
+    close_series = _column(stock_df, "close")
+    if direction == "down":
+        body_pct = (open_series / close_series - 1.0) * 100.0
+        is_directional = close_series < open_series
+    else:
+        body_pct = (close_series / open_series - 1.0) * 100.0
+        is_directional = close_series > open_series
+    return pd.Series(body_pct, index=stock_df.index), pd.Series(
+        is_directional, index=stock_df.index
+    )
+
+
+def _has_non_decreasing_body_strength(values: pd.Series) -> float:
+    sequence = list(values)
+    if any(pd.isna(value) for value in sequence):
+        return 0.0
+    return float(
+        all(float(sequence[idx]) <= float(sequence[idx + 1]) for idx in range(len(sequence) - 1))
+    )
+
+
+def _build_candle_run_signal_mask(
+    stock_df: pd.DataFrame, params: AnalysisParams
+) -> pd.Series:
+    direction = params.gap_direction
+    run_length = params.candle_run_length
+    body_pct, is_directional = _compute_candle_run_body_pct(stock_df, direction)
+    prior_body_pct = body_pct.shift(1)
+    prior_directional = is_directional.shift(1).eq(True)
+
+    all_directional = pd.Series(
+        prior_directional.rolling(run_length).sum(), index=stock_df.index
+    ).eq(float(run_length))
+    min_body_ok = prior_body_pct.rolling(run_length).min().ge(
+        params.candle_run_min_body_pct
+    )
+
+    first_open = _column(stock_df, "open").shift(run_length)
+    last_close = _column(stock_df, "close").shift(1)
+    if direction == "down":
+        total_move_pct = (first_open / last_close - 1.0) * 100.0
+    else:
+        total_move_pct = (last_close / first_open - 1.0) * 100.0
+    total_move_ok = pd.Series(total_move_pct, index=stock_df.index).ge(
+        params.candle_run_total_move_pct
+    )
+
+    signal_mask = all_directional & min_body_ok & total_move_ok
+    if params.entry_factor == "candle_run_acceleration":
+        acceleration_ok = prior_body_pct.rolling(run_length).apply(
+            _has_non_decreasing_body_strength,
+            raw=False,
+        ).eq(1.0)
+        signal_mask &= acceleration_ok
+    return signal_mask.fillna(False)
+
+
 def _resolve_entry_execution(
     signal_row: pd.Series,
     params: AnalysisParams,
@@ -60,19 +126,19 @@ def _resolve_entry_execution(
 ) -> tuple[float | None, float, str | None, str | None, str]:
     entry_factor = str(signal_row.get("entry_factor", params.entry_factor))
     if entry_factor not in BREAKOUT_ENTRY_FACTORS:
-        return float(signal_row["open"]), math.nan, "open", None, entry_factor
+        return _float_scalar(signal_row["open"]), math.nan, "open", None, entry_factor
 
     trigger_price_raw = signal_row["entry_trigger_price"]
     trigger_price = (
-        math.nan if _is_missing_scalar(trigger_price_raw) else float(trigger_price_raw)
+        math.nan if _is_missing_scalar(trigger_price_raw) else _float_scalar(trigger_price_raw)
     )
     if pd.isna(trigger_price):
         return None, math.nan, None, "entry_not_filled", entry_factor
 
-    day_open = float(signal_row["open"])
-    day_high = float(signal_row["high"])
-    day_low = float(signal_row["low"])
-    day_close = float(signal_row["close"])
+    day_open = _float_scalar(signal_row["open"])
+    day_high = _float_scalar(signal_row["high"])
+    day_low = _float_scalar(signal_row["low"])
+    day_close = _float_scalar(signal_row["close"])
 
     reference_buy_price: float | None = None
     entry_fill_type: str | None = None
@@ -96,7 +162,7 @@ def _resolve_entry_execution(
 
     volume = signal_row["volume"] if "volume" in signal_row else math.nan
     is_one_price_bar = day_open == day_high == day_low == day_close
-    has_nonpositive_volume = (not _is_missing_scalar(volume)) and float(volume) <= 0.0
+    has_nonpositive_volume = (not _is_missing_scalar(volume)) and _float_scalar(volume) <= 0.0
     if has_nonpositive_volume or is_one_price_bar:
         return None, trigger_price, None, "locked_bar_unfillable", entry_factor
 
@@ -165,7 +231,7 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
                 signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
                 signal_mask &= stock_df["open"] < stock_df["fast_ma"]
                 signal_mask &= stock_df["open"] < stock_df["slow_ma"]
-    else:
+    elif params.entry_factor in BREAKOUT_ENTRY_FACTORS:
         stock_df["entry_trigger_price"] = _compute_breakout_trigger_price(
             stock_df, params
         )
@@ -177,6 +243,16 @@ def apply_gap_filters(df: pd.DataFrame, params: AnalysisParams) -> pd.DataFrame:
             stock_df["is_contraction"] = prior_range.eq(contraction_floor)
             signal_mask &= stock_df["is_contraction"]
         signal_mask &= stock_df["entry_trigger_price"].notna()
+        if params.use_ma_filter:
+            signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
+            if params.gap_direction == "down":
+                signal_mask &= stock_df["open"] < stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] < stock_df["slow_ma"]
+            else:
+                signal_mask &= stock_df["open"] > stock_df["fast_ma"]
+                signal_mask &= stock_df["open"] > stock_df["slow_ma"]
+    else:
+        signal_mask &= _build_candle_run_signal_mask(stock_df, params)
         if params.use_ma_filter:
             signal_mask &= stock_df["fast_ma"].notna() & stock_df["slow_ma"].notna()
             if params.gap_direction == "down":
@@ -280,9 +356,9 @@ def _rule_triggered(
     peak_total_profit_ratio: float,
     current_total_profit_ratio: float,
 ) -> bool:
-    day_close = float(day_row["close"])
-    day_high = float(day_row["high"])
-    day_low = float(day_row["low"])
+    day_close = _float_scalar(day_row["close"])
+    day_high = _float_scalar(day_row["high"])
+    day_low = _float_scalar(day_row["low"])
 
     if rule.mode == "fixed_tp":
         if rule.target_profit_ratio is None:

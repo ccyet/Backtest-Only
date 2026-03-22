@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from data_loader import load_local_parquet_data
+from data_loader import load_local_parquet_data, resolve_local_data_root
 from models import AnalysisParams, validate_params
 
 
@@ -126,3 +126,41 @@ def test_local_parquet_loader_reads_and_filters(tmp_path: Path):
     assert out["stock_code"].nunique() == 1
     assert out["stock_code"].iloc[0] == "000001.SZ"
     assert out["date"].min() <= pd.Timestamp("2024-01-02") <= out["date"].max()
+
+
+def test_resolve_local_data_root_switches_default_daily_root_for_intraday_socket(tmp_path: Path):
+    resolved = resolve_local_data_root(str(tmp_path / "data" / "market" / "daily"), "30m")
+    assert resolved == tmp_path / "data" / "market" / "30m"
+
+
+def test_local_parquet_loader_uses_timeframe_resolved_root(tmp_path: Path):
+    import pytest
+
+    pytest.importorskip("pyarrow")
+    intraday_root = tmp_path / "market" / "30m"
+    qfq = intraday_root / "qfq"
+    qfq.mkdir(parents=True, exist_ok=True)
+
+    pd.DataFrame(
+        {
+            "date": ["2024-01-02 10:00:00", "2024-01-02 10:30:00"],
+            "symbol": ["000001.SZ", "000001.SZ"],
+            "open": [10.0, 10.2],
+            "high": [10.3, 10.5],
+            "low": [9.9, 10.1],
+            "close": [10.2, 10.4],
+            "volume": [100, 120],
+        }
+    ).to_parquet(qfq / "000001.SZ.parquet", index=False)
+
+    out = load_local_parquet_data(
+        "2024-01-02",
+        "2024-01-02",
+        stock_codes=("000001.SZ",),
+        local_data_root=str(tmp_path / "market" / "daily"),
+        adjust="qfq",
+        timeframe="30m",
+    )
+
+    assert len(out) == 2
+    assert out["stock_code"].iloc[0] == "000001.SZ"

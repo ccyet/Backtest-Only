@@ -4,7 +4,7 @@ from io import BytesIO
 import re
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pandas as pd
 
@@ -12,6 +12,7 @@ import pandas as pd
 REQUIRED_COLUMNS = ("date", "stock_code", "open", "high", "low", "close")
 OPTIONAL_COLUMNS = ("volume",)
 SUPPORTED_FILE_SUFFIXES = {".xlsx", ".xlsm", ".csv"}
+TIMEFRAME_DIR_NAMES = {"1d": "daily", "30m": "30m", "15m": "15m"}
 
 COLUMN_ALIASES = {
     "date": ("date", "trade_date", "trading_date", "trade_dt", "日期", "交易日期", "交易日"),
@@ -45,7 +46,7 @@ def parse_trade_dates(series: pd.Series) -> pd.Series:
 
     raw = series.astype(str).str.strip()
     parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-    numeric_values = pd.to_numeric(series, errors="coerce")
+    numeric_values = pd.Series(pd.to_numeric(series, errors="coerce"), index=series.index)
 
     compact_mask = raw.str.fullmatch(r"\d{8}")
     if compact_mask.any():
@@ -117,13 +118,25 @@ def _calculate_query_window(
     lookback_days: int,
     lookahead_days: int,
 ) -> tuple[pd.Timestamp, pd.Timestamp]:
-    signal_start = pd.to_datetime(start_date)
-    signal_end = pd.to_datetime(end_date)
+    signal_start = cast(pd.Timestamp, pd.to_datetime(start_date))
+    signal_end = cast(pd.Timestamp, pd.to_datetime(end_date))
     extra_history = max(lookback_days * 3, lookback_days + 10)
     extra_future = max(lookahead_days * 3, lookahead_days + 10)
-    query_start = signal_start - pd.Timedelta(days=extra_history)
-    query_end = signal_end + pd.Timedelta(days=extra_future)
+    query_start = cast(pd.Timestamp, signal_start - pd.Timedelta(days=extra_history))
+    query_end = cast(pd.Timestamp, signal_end + pd.Timedelta(days=extra_future))
     return query_start, query_end
+
+
+def resolve_local_data_root(local_data_root: str, timeframe: str = "1d") -> Path:
+    root = Path(local_data_root)
+    timeframe_dir = TIMEFRAME_DIR_NAMES.get(timeframe, timeframe)
+    if timeframe == "1d":
+        return root
+
+    normalized_parts = [part.lower() for part in root.parts]
+    if normalized_parts and normalized_parts[-1] == "daily":
+        return root.parent / timeframe_dir
+    return root
 
 
 def _normalize_loaded_data(
@@ -136,7 +149,7 @@ def _normalize_loaded_data(
     lookahead_days: int,
 ) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=REQUIRED_COLUMNS + OPTIONAL_COLUMNS)
+        return pd.DataFrame(columns=pd.Index(REQUIRED_COLUMNS + OPTIONAL_COLUMNS))
 
     renamed = df.rename(columns={actual: canonical for canonical, actual in column_map.items()}).copy()
     for column in REQUIRED_COLUMNS + OPTIONAL_COLUMNS:
@@ -144,12 +157,13 @@ def _normalize_loaded_data(
             renamed[column] = pd.NA
 
     normalized = renamed[list(REQUIRED_COLUMNS + OPTIONAL_COLUMNS)].copy()
-    normalized["date"] = parse_trade_dates(normalized["date"])
+    normalized["date"] = parse_trade_dates(cast(pd.Series, normalized["date"]))
     for column in ("open", "high", "low", "close", "volume"):
         normalized[column] = pd.to_numeric(normalized[column], errors="coerce")
 
-    normalized["stock_code"] = normalized["stock_code"].astype(str).str.strip().str.upper()
-    normalized = normalized.dropna(subset=["date", "stock_code", "open", "high", "low", "close"])
+    normalized["stock_code"] = cast(pd.Series, normalized["stock_code"]).astype(str).str.strip().str.upper()
+    required_mask = cast(pd.DataFrame, normalized[["date", "stock_code", "open", "high", "low", "close"]]).notna().all(axis=1)
+    normalized = normalized.loc[required_mask]
 
     query_start, query_end = _calculate_query_window(start_date, end_date, lookback_days, lookahead_days)
     mask = (normalized["date"] >= query_start.normalize()) & (normalized["date"] <= query_end.normalize())
@@ -519,8 +533,9 @@ def load_local_parquet_data(
     lookahead_days: int = 0,
     local_data_root: str = "data/market/daily",
     adjust: str = "qfq",
+    timeframe: str = "1d",
 ) -> pd.DataFrame:
-    root = Path(local_data_root)
+    root = resolve_local_data_root(local_data_root, timeframe)
     adjust_dir = root / adjust
     if not adjust_dir.exists():
         raise FileNotFoundError(f"本地数据目录不存在：{adjust_dir}")
@@ -585,6 +600,7 @@ def load_market_data(
     sheet_name: str | None = None,
     local_data_root: str = "data/market/daily",
     adjust: str = "qfq",
+    timeframe: str = "1d",
 ) -> pd.DataFrame:
     if source_type == "local_parquet":
         return load_local_parquet_data(
@@ -595,6 +611,7 @@ def load_market_data(
             lookahead_days=lookahead_days,
             local_data_root=local_data_root,
             adjust=adjust,
+            timeframe=timeframe,
         )
 
     if source_type == "sqlite":

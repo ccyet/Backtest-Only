@@ -4,6 +4,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import Mock
 
 import pandas as pd
 
@@ -130,6 +131,29 @@ class AppDisplayFormatterTest(unittest.TestCase):
         self.assertEqual(log_record["结束日期"], "2024-01-31")
         self.assertEqual(log_record["更新时间"], "2024-02-01 09:30")
         self.assertEqual(log_record["更新行数"], "123,456")
+
+    def test_dataframe_stretch_falls_back_for_legacy_streamlit_width_error(self) -> None:
+        dataframe_mock = Mock(
+            side_effect=[
+                TypeError("'str' object cannot be interpreted as an integer"),
+                None,
+            ]
+        )
+        original_dataframe = self.app.st.dataframe
+        self.app.st.dataframe = dataframe_mock
+        try:
+            self.app.dataframe_stretch(pd.DataFrame({"value": [1]}), height=280)
+        finally:
+            self.app.st.dataframe = original_dataframe
+
+        first_call = dataframe_mock.call_args_list[0]
+        second_call = dataframe_mock.call_args_list[1]
+        self.assertEqual(first_call.kwargs["width"], "stretch")
+        self.assertEqual(first_call.kwargs["height"], 280)
+        self.assertNotIn("use_container_width", first_call.kwargs)
+        self.assertNotIn("width", second_call.kwargs)
+        self.assertTrue(second_call.kwargs["use_container_width"])
+        self.assertEqual(second_call.kwargs["height"], 280)
 
 
 if __name__ == "__main__":
